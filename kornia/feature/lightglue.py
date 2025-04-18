@@ -148,7 +148,7 @@ class Attention(Module):
                 v = F.scaled_dot_product_attention(*args, attn_mask=mask).to(q.dtype)  # type: ignore
                 return v if mask is None else v.nan_to_num()
             else:
-                KORNIA_CHECK(mask is None)
+                # KORNIA_CHECK(mask is None)
                 q, k, v = (x.transpose(-2, -3).contiguous() for x in [q, k, v])
                 m = self.flash_(q.half(), stack([k, v], 2).half())
                 return m.transpose(-2, -3).to(q.dtype).clone()
@@ -170,7 +170,7 @@ class SelfBlock(Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        KORNIA_CHECK(self.embed_dim % num_heads == 0, "Embed dimension should be dividable by num_heads")
+        # KORNIA_CHECK(self.embed_dim % num_heads == 0, "Embed dimension should be dividable by num_heads")
         self.head_dim = self.embed_dim // num_heads
         self.Wqkv = nn.Linear(embed_dim, 3 * embed_dim, bias=bias)
         self.inner_attn = Attention(flash)
@@ -421,10 +421,10 @@ class LightGlue(Module):
         super().__init__()
         self.conf = conf = SimpleNamespace(**{**self.default_conf, **conf_})
         if features is not None:
-            KORNIA_CHECK(features in list(self.features.keys()), "Features keys are wrong")
+            # KORNIA_CHECK(features in list(self.features.keys()), "Features keys are wrong")
             for k, v in self.features[features].items():
                 setattr(conf, k, v)
-        KORNIA_CHECK(not (self.conf.add_scale_ori and self.conf.add_laf))  # we use either scale ori, or LAF
+        # KORNIA_CHECK(not (self.conf.add_scale_ori and self.conf.add_laf))  # we use either scale ori, or LAF
 
         if conf.input_dim != conf.descriptor_dim:
             self.input_proj = nn.Linear(conf.input_dim, conf.descriptor_dim, bias=True)
@@ -500,40 +500,45 @@ class LightGlue(Module):
 
         Input (dict):
             image0: dict
-                keypoints: [B x M x 2]
-                descriptors: [B x M x D]
-                image: [B x C x H x W] or image_size: [B x 2]
+                keypoints: [B x M x 2]      1 x 100 x 2
+                descriptors: [B x M x D]    1 x 100 x 64
+                image: [B x C x H x W] or image_size: [B x 2]  1 x 2
             image1: dict
-                keypoints: [B x N x 2]
-                descriptors: [B x N x D]
-                image: [B x C x H x W] or image_size: [B x 2]
+                keypoints: [B x N x 2]      1 x 100 x 2
+                descriptors: [B x N x D]    1 x 100 x 64
+                image: [B x C x H x W] or image_size: [B x 2]  1 x 2
         Output (dict):
-            log_assignment: [B x M+1 x N+1]
-            matches0: [B x M]
-            matching_scores0: [B x M]
-            matches1: [B x N]
-            matching_scores1: [B x N]
-            matches: List[[Si x 2]], scores: List[[Si]]
+            log_assignment: [B x M+1 x N+1]  1 x 101 x 101
+            matches0: [B x M]           1 x 101
+            matching_scores0: [B x M]   1 x 101
+            matches1: [B x N]           1 x 101
+            matching_scores1: [B x N]   1 x 101
+            matches: List[[Si x 2]] 
+            scores: List[[Si]]
         """
         with torch.autocast(enabled=self.conf.mp, device_type="cuda"):
             return self._forward(data)
 
     def _forward(self, data: dict) -> dict:  # type: ignore
-        for key in self.required_data_keys:
-            KORNIA_CHECK(key in data, f"Missing key {key} in data")
+        # for key in self.required_data_keys:
+        #     KORNIA_CHECK(key in data, f"Missing key {key} in data")
+
         data0, data1 = data["image0"], data["image1"]
         kpts0, kpts1 = data0["keypoints"], data1["keypoints"]
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
         device = kpts0.device
         size0, size1 = data0.get("image_size"), data1.get("image_size")
+        # Get image size from image if not provided
         size0 = size0 if size0 is not None else data0["image"].shape[-2:][::-1]
         size1 = size1 if size1 is not None else data1["image"].shape[-2:][::-1]
 
         kpts0 = normalize_keypoints(kpts0, size0).clone()
         kpts1 = normalize_keypoints(kpts1, size1).clone()
-        KORNIA_CHECK(torch.all(kpts0 >= -1).item() and torch.all(kpts0 <= 1).item(), "")  # type: ignore
-        KORNIA_CHECK(torch.all(kpts1 >= -1).item() and torch.all(kpts1 <= 1).item(), "")  # type: ignore
+        # KORNIA_CHECK(torch.all(kpts0 >= -1).item() and torch.all(kpts0 <= 1).item(), "")  # type: ignore
+        # KORNIA_CHECK(torch.all(kpts1 >= -1).item() and torch.all(kpts1 <= 1).item(), "")  # type: ignore
+
+        # By default we don't do this, whatever it is
         if self.conf.add_scale_ori:
             kpts0 = concatenate([kpts0] + [data0[k].unsqueeze(-1) for k in ("scales", "oris")], -1)
             if self.conf.scale_coef != 1.0:
@@ -541,6 +546,8 @@ class LightGlue(Module):
             kpts1 = concatenate([kpts1] + [data1[k].unsqueeze(-1) for k in ("scales", "oris")], -1)
             if self.conf.scale_coef != 1.0:
                 kpts1[..., -2] = kpts1[..., -2] * self.conf.scale_coef
+        
+        # Don't do by default
         elif self.conf.add_laf:
             laf0 = scale_laf(data0["lafs"], self.conf.scale_coef)
             laf1 = scale_laf(data1["lafs"], self.conf.scale_coef)
@@ -563,25 +570,31 @@ class LightGlue(Module):
                 -1,
             )
 
+        # Prevent operations on tensors from affecting computation graph
         desc0 = data0["descriptors"].detach().contiguous()
         desc1 = data1["descriptors"].detach().contiguous()
 
-        KORNIA_CHECK(desc0.shape[-1] == self.conf.input_dim, "Descriptor dimension does not match input dim in config")
-        KORNIA_CHECK(desc1.shape[-1] == self.conf.input_dim, "Descriptor dimension does not match input dim in config")
+        # KORNIA_CHECK(desc0.shape[-1] == self.conf.input_dim, "Descriptor dimension does not match input dim in config")
+        # KORNIA_CHECK(desc1.shape[-1] == self.conf.input_dim, "Descriptor dimension does not match input dim in config")
 
         if torch.is_autocast_enabled():
             desc0 = desc0.half()
             desc1 = desc1.half()
 
         mask0, mask1 = None, None
-        c = max(m, n)
+        c = max(m, n) # Maximum number of detected keypoints across both images
+        # static lengths can be
+        # [256, 512, 768, 1024, 1280, 1536]
         do_compile = self.static_lengths and c <= max(self.static_lengths)
         if do_compile:
+            # Get all static lengths >= c, then take the one that is the smallest
             kn = min([k for k in self.static_lengths if k >= c])
+            # Make all tensors the same size
             desc0, mask0 = pad_to_length(desc0, kn)
             desc1, mask1 = pad_to_length(desc1, kn)
             kpts0, _ = pad_to_length(kpts0, kn)
             kpts1, _ = pad_to_length(kpts1, kn)
+
         desc0 = self.input_proj(desc0)
         desc1 = self.input_proj(desc1)
         # cache positional embeddings
@@ -589,8 +602,11 @@ class LightGlue(Module):
         encoding1 = self.posenc(kpts1)
 
         # GNN + final_proj + assignment
-        do_early_stop = self.conf.depth_confidence > 0
-        do_point_pruning = self.conf.width_confidence > 0 and not do_compile
+        do_early_stop = False
+        do_point_pruning = False
+        # do_early_stop = self.conf.depth_confidence > 0
+        # do_point_pruning = self.conf.width_confidence > 0 and not do_compile
+
         pruning_th = self.pruning_min_kpts(device)
         if do_point_pruning:
             ind0 = arange(0, m, device=device)[None]
@@ -599,6 +615,8 @@ class LightGlue(Module):
             prune0 = ones_like(ind0)
             prune1 = ones_like(ind1)
         token0, token1 = None, None
+
+        # Push through transformer layers
         for i in range(self.conf.n_layers):
             desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, mask0=mask0, mask1=mask1)
             if i == self.conf.n_layers - 1:
@@ -640,19 +658,19 @@ class LightGlue(Module):
             mscores.append(mscores0[k][valid])
 
         # TODO: Remove when hloc switches to the compact format.
-        if do_point_pruning:
-            m0_ = torch.full((b, m), -1, device=m0.device, dtype=m0.dtype)
-            m1_ = torch.full((b, n), -1, device=m1.device, dtype=m1.dtype)
-            m0_[:, ind0] = where(m0 == -1, -1, ind1.gather(1, m0.clamp(min=0)))
-            m1_[:, ind1] = where(m1 == -1, -1, ind0.gather(1, m1.clamp(min=0)))
-            mscores0_ = zeros((b, m), device=mscores0.device)
-            mscores1_ = zeros((b, n), device=mscores1.device)
-            mscores0_[:, ind0] = mscores0
-            mscores1_[:, ind1] = mscores1
-            m0, m1, mscores0, mscores1 = m0_, m1_, mscores0_, mscores1_
-        else:
-            prune0 = ones_like(mscores0) * self.conf.n_layers
-            prune1 = ones_like(mscores1) * self.conf.n_layers
+        # if do_point_pruning:
+        #     m0_ = torch.full((b, m), -1, device=m0.device, dtype=m0.dtype)
+        #     m1_ = torch.full((b, n), -1, device=m1.device, dtype=m1.dtype)
+        #     m0_[:, ind0] = where(m0 == -1, -1, ind1.gather(1, m0.clamp(min=0)))
+        #     m1_[:, ind1] = where(m1 == -1, -1, ind0.gather(1, m1.clamp(min=0)))
+        #     mscores0_ = zeros((b, m), device=mscores0.device)
+        #     mscores1_ = zeros((b, n), device=mscores1.device)
+        #     mscores0_[:, ind0] = mscores0
+        #     mscores1_[:, ind1] = mscores1
+        #     m0, m1, mscores0, mscores1 = m0_, m1_, mscores0_, mscores1_
+        # else:
+        #     prune0 = ones_like(mscores0) * self.conf.n_layers
+        #     prune1 = ones_like(mscores1) * self.conf.n_layers
 
         pred = {
             "log_assignment": scores,
@@ -660,11 +678,11 @@ class LightGlue(Module):
             "matches1": m1,
             "matching_scores0": mscores0,
             "matching_scores1": mscores1,
-            "stop": i + 1,
+            # "stop": i + 1,
             "matches": matches,
             "scores": mscores,
-            "prune0": prune0,
-            "prune1": prune1,
+            # "prune0": prune0,
+            # "prune1": prune1,
         }
 
         return pred
